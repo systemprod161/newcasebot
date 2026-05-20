@@ -1,270 +1,142 @@
 import os
 import asyncio
-import aiohttp
-import statistics
-from fastapi import FastAPI
-from aiogram import Bot, Dispatcher, types
-from openai import OpenAI
-import uvicorn
+import logging
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, CallbackQuery
+from aiogram.filters import Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from dotenv import load_dotenv
 
-# =========================
+# =====================
 # CONFIG
-# =========================
+# =====================
+
+load_dotenv()
 
 BOT_TOKEN = os.getenv("8701511595:AAFhcipS4PB4pa8ygEqwFcCJiTwHFJ9-mMU")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", None)
 
-BASE_URL = "https://case-battle.red"
-ASSETS_API = BASE_URL + "/api/assets?priceMin=0&priceMax=999999&page=1"
+logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-app = FastAPI()
-client = OpenAI(api_key=OPENAI_API_KEY)
 
-# =========================
-# MEMORY STATE
-# =========================
+user_state = {}
 
-user_balance = {}
-loss_streak = {}
-trades = []
+# =====================
+# KEYBOARD
+# =====================
 
-# =========================
-# MARKET DATA
-# =========================
+def main_menu():
+    kb = InlineKeyboardBuilder()
 
-class Market:
+    kb.button(text="📊 Статус", callback_data="status")
+    kb.button(text="💰 Баланс", callback_data="balance")
+    kb.button(text="🤖 AI совет", callback_data="ai")
+    kb.button(text="📈 Анализ кейсов", callback_data="cases")
+    kb.button(text="⚙️ Настройки", callback_data="settings")
 
-    async def get_assets(self):
-        async with aiohttp.ClientSession() as s:
-            async with s.get(ASSETS_API) as r:
-                return await r.json()
+    kb.adjust(2)
+    return kb.as_markup()
 
-market = Market()
 
-# =========================
-# EV ENGINE
-# =========================
+# =====================
+# START
+# =====================
 
-class EVEngine:
-
-    def calculate_ev(self, items):
-        return sum(i["price"] * i.get("probability", 0) for i in items)
-
-    def roi(self, case_price, ev):
-        return (ev - case_price) / case_price * 100 if case_price else 0
-
-    def volatility(self, items):
-        vals = [i["price"] for i in items]
-        if len(vals) < 2:
-            return 0
-        return statistics.pstdev(vals)
-
-ev_engine = EVEngine()
-
-# =========================
-# RISK ENGINE
-# =========================
-
-class RiskEngine:
-
-    def risk_score(self, volatility, loss_streak_value):
-        return volatility * 0.7 + loss_streak_value * 2
-
-    def should_stop(self, balance, loss_streak_value, risk):
-
-        if balance < 20:
-            return True, "LOW_BALANCE"
-
-        if loss_streak_value >= 4:
-            return True, "LOSS_STREAK"
-
-        if risk > 50:
-            return True, "HIGH_RISK"
-
-        return False, "OK"
-
-risk_engine = RiskEngine()
-
-# =========================
-# SIGNAL ENGINE
-# =========================
-
-class SignalEngine:
-
-    def signal(self, ev, risk, balance):
-
-        if balance < 20:
-            return "STOP"
-
-        if risk > 50:
-            return "AVOID"
-
-        if ev > 1.15:
-            return "STRONG_BUY"
-
-        if ev > 1.05:
-            return "BUY"
-
-        return "WAIT"
-
-signal_engine = SignalEngine()
-
-# =========================
-# PORTFOLIO
-# =========================
-
-class Portfolio:
-
-    def add_trade(self, cost, payout):
-        trades.append({
-            "cost": cost,
-            "payout": payout,
-            "pnl": payout - cost
-        })
-
-    def pnl(self):
-        return sum(t["pnl"] for t in trades)
-
-    def roi(self):
-        inv = sum(t["cost"] for t in trades)
-        if inv == 0:
-            return 0
-        return self.pnl() / inv * 100
-
-portfolio = Portfolio()
-
-# =========================
-# AI ADVISOR
-# =========================
-
-class AIAdvisor:
-
-    def analyze(self, context):
-
-        res = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
-                "role": "user",
-                "content": f"""
-You are a professional risk analyst.
-
-RULES:
-- no prediction of RNG
-- only statistical analysis
-- focus on bankroll safety
-
-DATA:
-{context}
-
-OUTPUT:
-- signal
-- explanation
-- recommendation
-"""
-            }]
-        )
-
-        return res.choices[0].message.content
-
-ai = AIAdvisor()
-
-# =========================
-# TELEGRAM BOT
-# =========================
-
-@dp.message()
-async def handler(message: types.Message):
-
-    uid = message.from_user.id
-    text = message.text
-
-    if text.startswith("/balance"):
-        user_balance[uid] = float(text.split()[1])
-        await message.answer("Balance set")
-
-    elif text == "/status":
-
-        bal = user_balance.get(uid, 0)
-        ls = loss_streak.get(uid, 0)
-
-        assets = await market.get_assets()
-
-        # fake EV model (from assets prices only)
-        ev = sum(a["price"] for a in assets[:10]) / 10 / 100
-        vol = ev_engine.volatility(assets[:10])
-
-        risk = risk_engine.risk_score(vol, ls)
-
-        stop, reason = risk_engine.should_stop(bal, ls, risk)
-
-        signal = signal_engine.signal(ev, risk, bal)
-
-        context = {
-            "balance": bal,
-            "ev": ev,
-            "risk": risk,
-            "signal": signal,
-            "stop": reason,
-            "pnl": portfolio.pnl(),
-            "roi": portfolio.roi()
-        }
-
-        result = ai.analyze(context)
-
-        await message.answer(result)
-
-    elif text == "/portfolio":
-        await message.answer(
-            f"""
-📊 PORTFOLIO
-
-PnL: {portfolio.pnl()}
-ROI: {portfolio.roi():.2f}%
-Trades: {len(trades)}
-"""
-        )
-
-# =========================
-# FASTAPI DASHBOARD
-# =========================
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-@app.get("/portfolio")
-def get_portfolio():
-    return {
-        "pnl": portfolio.pnl(),
-        "roi": portfolio.roi(),
-        "trades": len(trades)
+@dp.message(Command("start"))
+async def start(message: Message):
+    user_state[message.from_user.id] = {
+        "balance": 0
     }
 
-@app.get("/risk")
-async def risk():
-    assets = await market.get_assets()
-    vol = ev_engine.volatility(assets[:10])
+    await message.answer(
+        "🎮 Case Battle AI Bot\nВыбери действие:",
+        reply_markup=main_menu()
+    )
 
-    return {
-        "volatility": vol
+
+# =====================
+# CALLBACKS
+# =====================
+
+@dp.callback_query(F.data == "status")
+async def status(call: CallbackQuery):
+    await call.message.answer(
+        "🟢 Бот работает\n"
+        "🟡 Parser: demo mode\n"
+        "🔵 AI: ready"
+    )
+
+
+@dp.callback_query(F.data == "balance")
+async def balance(call: CallbackQuery):
+    await call.message.answer("💰 Введи баланс числом:")
+
+
+@dp.message(lambda m: m.text.isdigit())
+async def set_balance(message: Message):
+    user_state[message.from_user.id]["balance"] = int(message.text)
+
+    await message.answer(
+        f"✅ Баланс установлен: {message.text}\n"
+        "Теперь я могу строить стратегию."
+    )
+
+
+@dp.callback_query(F.data == "cases")
+async def cases(call: CallbackQuery):
+    balance = user_state.get(call.from_user.id, {}).get("balance", 0)
+
+    # MOCK ANALYTICS (сюда потом вставишь парсер Case Battle)
+    analysis = {
+        "best_case": "Silver Case",
+        "roi": "12-18%",
+        "risk": "medium" if balance < 500 else "high"
     }
 
-# =========================
-# RUN BOTH (BOT + API)
-# =========================
+    await call.message.answer(
+        f"📈 Анализ кейсов:\n"
+        f"🏆 Лучший: {analysis['best_case']}\n"
+        f"💰 ROI: {analysis['roi']}\n"
+        f"⚠️ Риск: {analysis['risk']}"
+    )
 
-async def start_bot():
+
+@dp.callback_query(F.data == "ai")
+async def ai(call: CallbackQuery):
+    balance = user_state.get(call.from_user.id, {}).get("balance", 0)
+
+    # УПРОЩЁННЫЙ AI (без OpenAI чтобы не ломалось)
+    if balance == 0:
+        text = "Сначала укажи баланс"
+    elif balance < 100:
+        text = "🔴 Малый баланс: играй только low-risk кейсы"
+    elif balance < 500:
+        text = "🟡 Средний риск: можно пробовать кейсы до 50"
+    else:
+        text = "🟢 Агрессивная стратегия возможна, но следи за просадками"
+
+    await call.message.answer(f"🤖 AI анализ:\n{text}")
+
+
+@dp.callback_query(F.data == "settings")
+async def settings(call: CallbackQuery):
+    await call.message.answer(
+        "⚙️ Настройки:\n"
+        "- режим анализа: demo\n"
+        "- обновление: manual\n"
+        "- AI: local rules"
+    )
+
+
+# =====================
+# MAIN
+# =====================
+
+async def main():
     await dp.start_polling(bot)
 
+
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-
-    loop.create_task(start_bot())
-
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", 10000))
-    )
+    asyncio.run(main())
