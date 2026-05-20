@@ -1,121 +1,83 @@
 import os
-import logging
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
+import asyncio
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, CallbackQuery
+from aiogram.filters import Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("8701511595:AAFhcipS4PB4pa8ygEqwFcCJiTwHFJ9-mMU")
 
-logging.basicConfig(level=logging.INFO)
-
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
 
-# память пользователей
 users = {}
 
-# =========================
-# /start
-# =========================
-@dp.message_handler(commands=["start"])
-async def start(message: types.Message):
-    users[message.from_user.id] = {
-        "balance": 0,
-        "mode": "safe"
-    }
+# ================= MENU =================
 
-    await message.answer(
-        "🎮 Case Battle AI Bot\n\n"
-        "Команды:\n"
-        "/balance - установить баланс\n"
-        "/ai - получить стратегию\n"
-        "/cases - анализ кейсов (demo)\n"
-        "/upgrade - анализ апгрейдов\n"
-    )
+def menu():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📊 Статус", callback_data="status")
+    kb.button(text="💰 Баланс", callback_data="balance")
+    kb.button(text="🤖 AI", callback_data="ai")
+    kb.button(text="📈 Кейсы", callback_data="cases")
+    kb.adjust(2)
+    return kb.as_markup()
 
+# ================= START =================
 
-# =========================
-# баланс
-# =========================
-@dp.message_handler(commands=["balance"])
-async def balance_cmd(message: types.Message):
-    await message.answer("💰 Отправь свой баланс числом")
+@dp.message(Command("start"))
+async def start(message: Message):
+    users[message.from_user.id] = {"balance": 0}
+    await message.answer("🎮 Case Battle AI Bot", reply_markup=menu())
 
+# ================= BALANCE =================
 
-@dp.message_handler(lambda m: m.text.isdigit())
-async def set_balance(message: types.Message):
+@dp.message(F.text.regexp(r"^\d+$"))
+async def set_balance(message: Message):
     users[message.from_user.id] = users.get(message.from_user.id, {})
     users[message.from_user.id]["balance"] = int(message.text)
 
-    await message.answer(f"✅ Баланс установлен: {message.text}")
+    await message.answer(f"💰 Баланс: {message.text}")
 
+# ================= CALLBACKS =================
 
-# =========================
-# AI стратегия
-# =========================
-@dp.message_handler(commands=["ai"])
-async def ai(message: types.Message):
-    balance = users.get(message.from_user.id, {}).get("balance", 0)
+@dp.callback_query(F.data == "status")
+async def status(call: CallbackQuery):
+    await call.message.answer("🟢 Bot running\n🟡 Parser: ready\n🔵 AI: active")
 
-    if balance <= 0:
-        text = "❗ Сначала задай баланс через /balance"
-    elif balance < 100:
-        text = (
-            "🔴 SAFE режим\n"
-            "- только дешёвые кейсы\n"
-            "- без апгрейдов\n"
-            "- цель: минимизировать риск"
-        )
-    elif balance < 500:
-        text = (
-            "🟡 BALANCED режим\n"
-            "- кейсы до 10–50\n"
-            "- апгрейд до 30%\n"
-            "- осторожный риск"
-        )
+@dp.callback_query(F.data == "balance")
+async def balance(call: CallbackQuery):
+    await call.message.answer("Отправь число баланса")
+
+@dp.callback_query(F.data == "cases")
+async def cases(call: CallbackQuery):
+    await call.message.answer(
+        "📈 CASE ANALYSIS\n"
+        "Best: Silver Case\n"
+        "ROI: 10–20%\n"
+        "Risk: medium"
+    )
+
+@dp.callback_query(F.data == "ai")
+async def ai(call: CallbackQuery):
+    bal = users.get(call.from_user.id, {}).get("balance", 0)
+
+    if bal < 100:
+        msg = "🔴 SAFE MODE"
+    elif bal < 500:
+        msg = "🟡 MEDIUM RISK"
     else:
-        text = (
-            "🟢 AGGRESSIVE режим\n"
-            "- можно риск кейсы\n"
-            "- апгрейды 40–60%\n"
-            "- высокая волатильность"
-        )
+        msg = "🟢 HIGH RISK"
 
-    await message.answer("🤖 AI стратегия:\n\n" + text)
+    await call.message.answer(f"🤖 AI:\n{msg}")
 
+# ================= RUN =================
 
-# =========================
-# анализ кейсов (заглушка под парсер)
-# =========================
-@dp.message_handler(commands=["cases"])
-async def cases(message: types.Message):
-    await message.answer(
-        "📊 Анализ кейсов:\n\n"
-        "🏆 Best case: Silver Case\n"
-        "📈 ROI: 10–18%\n"
-        "⚠️ Risk: medium\n\n"
-        "💡 (подключи parser позже для реальных данных)"
-    )
+async def main():
+    await dp.start_polling(bot)
 
-
-# =========================
-# апгрейды
-# =========================
-@dp.message_handler(commands=["upgrade"])
-async def upgrade(message: types.Message):
-    await message.answer(
-        "🚀 Анализ апгрейдов:\n\n"
-        "- безопасный шанс: 20–35%\n"
-        "- средний: 35–55%\n"
-        "- высокий риск: 55%+\n\n"
-        "⚠️ сейчас рынок нестабилен"
-    )
-
-
-# =========================
-# запуск
-# =========================
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True)
+    asyncio.run(main())
